@@ -1,0 +1,14 @@
+# The [voice] extra is what pulls in PyNaCl, which encrypts the audio going to
+# Discord. Without it discord.py imports fine and joining a channel fails, so it
+# belongs here rather than in a note somewhere.
+discord.py[voice]>=2.4.0
+aiohttp>=3.9.0
+
+# Deliberately unpinned. YouTube changes what it serves every few weeks and
+# breaks whichever yt-dlp came before; a pin here is a bot that plays nothing a
+# month from now.
+yt-dlp
+
+# Ships an ffmpeg binary. The fallback in music.py uses it when nothing is on
+# PATH, which on a hosting container is the usual state of affairs.
+imageio-ffmpeg>=0.5.1
