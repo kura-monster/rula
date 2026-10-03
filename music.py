@@ -1456,8 +1456,24 @@ class _SearchSelect(discord.ui.Select):
         view: SearchView = self.view
         track = view.tracks[int(self.values[0])]
         view.clear_items()
-        await interaction.response.edit_message(view=view)
         view.stop()
+
+        # Discord interaction tokens expire in 3 seconds if not acknowledged.
+        # defer() acknowledges immediately (budget: 15 min), then we edit
+        # afterwards — this prevents the NotFound that happens when enqueue
+        # or a connect() call takes longer than the 3-second window.
+        try:
+            await interaction.response.defer()
+        except discord.NotFound:
+            pass   # already acknowledged or token already gone
+
+        # Remove the dropdown from the original message.
+        try:
+            await interaction.edit_original_response(view=view)
+        except (discord.NotFound, discord.HTTPException):
+            # Message may have been deleted; not worth aborting the play.
+            pass
+
         # Caught here because a component callback has no error handler behind
         # it: the cog's would never see this, and the person who chose a song
         # would be left with a dead menu and no reason given.
@@ -1465,6 +1481,7 @@ class _SearchSelect(discord.ui.Select):
             await view.cog.enqueue(view.ctx, [track])
         except MusicError as e:
             await view.cog.say(view.ctx, str(e), error=True)
+
 
 
 class Music(commands.Cog, name="音楽"):
@@ -2252,17 +2269,29 @@ class Music(commands.Cog, name="音楽"):
     @commands.command(name="edit", aliases=["Edit", "エディット"])
     async def edit_cmd(self, ctx: commands.Context, *, query: str = ""):
         """曲名/URL/SpotifyリンクからYouTubeのEdit版（sped up, slowed reverb, phonk edit等）を検索します。
-        例: R!edit Homage Funk
+        例: R!edit Homage Funk        → 最大8件
+        例: R!edit Homage Funk 5      → 5件
         例: R!edit https://open.spotify.com/track/...
         """
         if not query:
             raise MusicError(
                 "曲名、URL、SpotifyリンクなどをR!editの後に入力してください。\n"
                 "例: `R!edit Homage Funk`\n"
-                "例: `R!edit https://open.spotify.com/track/...`"
+                "例: `R!edit Homage Funk 5`  （件数指定）"
             )
 
+        # 末尾に数字があれば件数として取り出す（例: "Homage Funk 5" → query="Homage Funk", limit=5）
+        _limit_re = re.compile(r"^(.*?)\s+(\d+)\s*$", re.S)
+        limit = 8
+        m = _limit_re.match(query)
+        if m and not _URL.match(query):   # URLのポート番号を誤検知しないよう除外
+            candidate = int(m.group(2))
+            if 1 <= candidate <= 20:
+                query = m.group(1).strip()
+                limit = candidate
+
         async with ui.typing(ctx):
+
             # SpotifyなどDRM系リンクは曲名を解決してから検索
             base_query = query.strip()
             if _METADATA_ONLY.match(base_query):
@@ -2317,10 +2346,10 @@ class Music(commands.Cog, name="音楽"):
             await asyncio.gather(*[_fetch_one(kw) for kw in primary_kws])
 
             # 候補が少なければ残りのキーワードでも補完
-            if len(all_tracks) < 5:
+            if len(all_tracks) < limit:
                 for kw in _EDIT_KEYWORDS[3:]:
                     await _fetch_one(kw)
-                    if len(all_tracks) >= 8:
+                    if len(all_tracks) >= limit:
                         break
 
         if not all_tracks:
@@ -2329,23 +2358,24 @@ class Music(commands.Cog, name="音楽"):
                 "別のキーワードで試してみてください。"
             )
 
-        # 最大8件に絞って選択式で表示
-        result_tracks = all_tracks[:8]
+        # limitで指定した件数分をURLリンク付きで表示するだけ（再生はしない）
+        result_tracks = all_tracks[:limit]
         lines = [
-            f"`{i + 1}.` {t.label()} `[{duration(t.duration)}]`"
+            f"`{i + 1}.` [{ui.clip(ui.strip_emoji(t.title), 60)}]({t.url})"
+            f"  `[{duration(t.duration)}]`"
             for i, t in enumerate(result_tracks)
         ]
-        view = SearchView(self, ctx, result_tracks)
         body = ui.embed(
             "\n".join(lines),
-            f"「{ui.clip(base_query, 40)}」のEdit版 検索結果",
+            f"「{ui.clip(base_query, 40)}」のEdit版 検索結果（{len(result_tracks)}件）",
             COLOR_MUSIC,
         )
         try:
-            view.message = await ctx.reply(**ui.payload(ctx.channel, body),
-                                           view=view, mention_author=False)
+            await ctx.reply(**ui.payload(ctx.channel, body), mention_author=False)
         except ui.SEND_ERRORS as e:
             log.warning("edit検索結果を送れませんでした: %s", ui.short_error(e))
+
+
 
     @commands.command(name="skip", aliases=["s", "next"])
     async def skip(self, ctx: commands.Context):
